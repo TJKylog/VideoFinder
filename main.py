@@ -170,7 +170,11 @@ def main() -> None:
     extract_fn = extract_fingerprint  # default: CPU + pHash
     if config.USE_GPU:
         try:
-            from gpu_extractor import extract_fingerprint_gpu, get_gpu_device_name
+            from gpu_extractor import (
+                extract_fingerprint_gpu,
+                extract_fingerprints_gpu_pipeline,
+                get_gpu_device_name,
+            )
             device_name = get_gpu_device_name()
             print(f"🚀 Modo GPU activado: {device_name}")
             print(f"   Batch size: {config.GPU_BATCH_SIZE} | Cosine threshold: {config.COSINE_THRESHOLD}\n")
@@ -208,7 +212,7 @@ def main() -> None:
         print(f"🔍 Extrayendo huellas digitales de {len(videos_to_process)} videos...")
 
         if config.USE_GPU:
-            # GPU: procesar secuencialmente (la GPU ya paraleliza internamente)
+            # GPU: pipeline paralelo (lectura I/O en hilos + GPU en main thread)
             save_every = max(10, len(videos_to_process) // 20)
 
             interrupted = False
@@ -222,25 +226,31 @@ def main() -> None:
             signal.signal(signal.SIGINT, _sigint_handler)
 
             processed_count = 0
+
+            pbar = tqdm(total=len(videos_to_process), unit="video", ncols=90)
+
+            def _on_complete(fp):
+                nonlocal processed_count
+                fingerprints.append(fp)
+                cache.put(fp.path, fp)
+                processed_count += 1
+
+                if processed_count % save_every == 0:
+                    cache.save()
+
+                status = (f"✅ {len(fp.hashes)} emb"
+                          if not fp.error else f"❌ {fp.error[:30]}")
+                pbar.set_postfix_str(f"{fp.path.name[:25]} → {status}")
+                pbar.update(1)
+
             try:
-                with tqdm(total=len(videos_to_process), unit="video", ncols=90) as pbar:
-                    for v in videos_to_process:
-                        if interrupted:
-                            break
-
-                        fp = extract_fn(v)
-                        fingerprints.append(fp)
-                        cache.put(fp.path, fp)
-                        processed_count += 1
-
-                        if processed_count % save_every == 0:
-                            cache.save()
-
-                        status = (f"✅ {len(fp.hashes)} emb"
-                                  if not fp.error else f"❌ {fp.error[:30]}")
-                        pbar.set_postfix_str(f"{fp.path.name[:25]} → {status}")
-                        pbar.update(1)
+                extract_fingerprints_gpu_pipeline(
+                    videos_to_process,
+                    on_complete=_on_complete,
+                    read_workers=4,
+                )
             finally:
+                pbar.close()
                 signal.signal(signal.SIGINT, original_sigint)
                 cache.save()
                 print(f"\n   💾 Caché guardada ({cache.size} videos totales)")

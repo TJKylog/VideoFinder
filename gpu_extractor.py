@@ -5,6 +5,11 @@ Usa MobileNetV3-Small para generar embeddings densos de 576 dimensiones
 por frame. Es ~5-10× más rápido que pHash cuando hay GPU disponible y
 produce embeddings de mayor calidad para detección de duplicados.
 
+Optimizaciones:
+  - Pipeline con ThreadPoolExecutor: lectura de video (I/O) en paralelo
+    mientras la GPU procesa el batch anterior.
+  - Procesamiento de frames en batches grandes.
+
 Backends GPU soportados:
   - MPS  (macOS Apple Silicon)
   - CUDA (NVIDIA)
@@ -14,6 +19,8 @@ Backends GPU soportados:
 import gc
 import os
 import sys
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, Future
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -248,11 +255,10 @@ def _clear_gpu_cache():
         if _device is not None and _device.type == "cuda":
             _torch.cuda.empty_cache()
         elif _device is not None and _device.type == "mps":
-            # MPS: forzar sincronización para liberar buffers
             try:
                 _torch.mps.empty_cache()
             except AttributeError:
-                pass  # versiones antiguas de PyTorch sin esta API
+                pass
 
 
 def extract_fingerprint_gpu(video_path: Path) -> VideoFingerprint:
@@ -272,13 +278,94 @@ def extract_fingerprint_gpu(video_path: Path) -> VideoFingerprint:
 
         fp.hashes = _frames_to_embeddings(frames)
 
-        # Liberar frames crudos y limpiar GPU después de cada video
         del frames
         _clear_gpu_cache()
 
     except Exception as exc:
         fp.error = str(exc)
-        # Limpiar GPU incluso en caso de error
         _clear_gpu_cache()
 
     return fp
+
+
+# ─── Pipeline: lectura paralela + GPU ────────────────────────────────────────
+
+def extract_fingerprints_gpu_pipeline(
+    video_paths: List[Path],
+    on_complete=None,
+    read_workers: int = 4,
+) -> List[VideoFingerprint]:
+    """
+    Procesa múltiples videos con pipeline paralelo:
+      - ThreadPool (read_workers hilos) lee videos del disco (I/O bound)
+      - Mientras tanto, la GPU procesa los frames del video anterior
+
+    Parameters
+    ----------
+    video_paths : List[Path]
+        Videos a procesar.
+    on_complete : callable, optional
+        Callback(fp: VideoFingerprint) llamado después de procesar cada video.
+    read_workers : int
+        Hilos para lectura paralela de video (default: 4).
+
+    Returns
+    -------
+    List[VideoFingerprint]
+    """
+    _lazy_load_torch()
+    results: List[VideoFingerprint] = []
+
+    # Usamos un ThreadPool para pre-leer videos mientras la GPU trabaja
+    with ThreadPoolExecutor(max_workers=read_workers) as reader_pool:
+        # Crear un buffer de futuros de lectura (pre-fetch)
+        prefetch_size = read_workers + 1
+        pending_reads: deque = deque()
+        path_iter = iter(video_paths)
+
+        # Llenar el buffer inicial de pre-fetch
+        for _ in range(min(prefetch_size, len(video_paths))):
+            try:
+                path = next(path_iter)
+                future = reader_pool.submit(_extract_frames, path)
+                pending_reads.append((path, future))
+            except StopIteration:
+                break
+
+        # Procesar: tomar resultado de lectura → GPU → encolar siguiente lectura
+        while pending_reads:
+            path, read_future = pending_reads.popleft()
+            fp = VideoFingerprint(path=path)
+
+            try:
+                frames, meta = read_future.result()
+                fp.fps = meta["fps"]
+                fp.frame_count = meta["frame_count"]
+                fp.width = meta["width"]
+                fp.height = meta["height"]
+                fp.duration_seconds = meta["duration_seconds"]
+
+                # Mientras la GPU procesa, el ThreadPool ya está leyendo
+                # el siguiente video en background
+                fp.hashes = _frames_to_embeddings(frames)
+                del frames
+
+            except Exception as exc:
+                fp.error = str(exc)
+
+            results.append(fp)
+            if on_complete:
+                on_complete(fp)
+
+            # Encolar siguiente lectura
+            try:
+                next_path = next(path_iter)
+                future = reader_pool.submit(_extract_frames, next_path)
+                pending_reads.append((next_path, future))
+            except StopIteration:
+                pass
+
+        # Limpiar GPU al final
+        _clear_gpu_cache()
+
+    return results

@@ -155,18 +155,22 @@ def _greedy_match_cosine(
     return matches, avg_sim
 
 
-def compare_pair(
+def _compare_with_matrices(
     fp_a: VideoFingerprint,
     fp_b: VideoFingerprint,
+    mat_a: np.ndarray,
+    mat_b: np.ndarray,
 ) -> MatchResult:
     """
-    Compara dos fingerprints usando distancia Hamming vectorizada.
+    Compara dos fingerprints usando matrices de hashes pre-construidas.
+    Evita reconstruir la matriz cada vez.
     """
     # Asegurar que A es el más corto (menos hashes)
-    if len(fp_a.hashes) > len(fp_b.hashes):
+    if mat_a.shape[0] > mat_b.shape[0]:
         fp_a, fp_b = fp_b, fp_a
+        mat_a, mat_b = mat_b, mat_a
 
-    total_a = len(fp_a.hashes)
+    total_a = mat_a.shape[0]
     if total_a == 0:
         return MatchResult(
             video_a=fp_a, video_b=fp_b,
@@ -174,17 +178,11 @@ def compare_pair(
             best_offset=0, match_ratio=0.0, avg_hamming=999.0,
         )
 
-    mat_a = _build_hash_matrix(fp_a.hashes)
-    mat_b = _build_hash_matrix(fp_b.hashes)
-
     if config.USE_GPU:
-        # Modo GPU: similitud coseno sobre embeddings float32
         matches, avg_sim = _greedy_match_cosine(
             mat_a.astype(np.float32), mat_b.astype(np.float32),
             config.COSINE_THRESHOLD,
         )
-        # Convertir similitud coseno a un "score" compatible con el reporte
-        # avg_hamming aquí representa (1 - avg_similarity) para consistencia
         avg_metric = (1.0 - avg_sim) * 100 if avg_sim > 0 else 999.0
     else:
         matches, avg_metric = _greedy_match_fast(mat_a, mat_b, config.HAMMING_THRESHOLD)
@@ -200,6 +198,19 @@ def compare_pair(
     )
 
 
+def compare_pair(
+    fp_a: VideoFingerprint,
+    fp_b: VideoFingerprint,
+) -> MatchResult:
+    """
+    Compara dos fingerprints (construye matrices internamente).
+    Útil para comparaciones individuales.
+    """
+    mat_a = _build_hash_matrix(fp_a.hashes)
+    mat_b = _build_hash_matrix(fp_b.hashes)
+    return _compare_with_matrices(fp_a, fp_b, mat_a, mat_b)
+
+
 def compare_all(
     fingerprints: List[VideoFingerprint],
     show_progress: bool = True,
@@ -207,15 +218,48 @@ def compare_all(
     """
     Compara todos los pares posibles y devuelve solo los resultados
     que superan el umbral de similitud (duplicados).
+
+    Optimizaciones vs versión anterior:
+      - No materializa list(combinations()) → usa generador directo.
+      - Pre-construye matrices de hashes UNA vez → evita rebuild por par.
+      - Pre-filtra por duración para descartar pares imposibles.
     """
     results: List[MatchResult] = []
     valid = [fp for fp in fingerprints if fp.hashes and not fp.error]
 
-    pairs = list(combinations(valid, 2))
+    if len(valid) < 2:
+        return results
 
-    iterator = tqdm(pairs, unit="par", ncols=90, desc="   Comparando") if show_progress else pairs
+    # Pre-construir matriz de hashes/embeddings para cada video (una sola vez)
+    matrices = {}
+    for fp in valid:
+        matrices[id(fp)] = _build_hash_matrix(fp.hashes)
+
+    n_pairs = len(valid) * (len(valid) - 1) // 2
+
+    # Iterar pares como generador, sin materializar la lista completa
+    pair_gen = combinations(valid, 2)
+    iterator = (
+        tqdm(pair_gen, total=n_pairs, unit="par", ncols=90, desc="   Comparando")
+        if show_progress else pair_gen
+    )
+
     for fp_a, fp_b in iterator:
-        result = compare_pair(fp_a, fp_b)
+        # Pre-filtro por duración: si A dura más que B,
+        # A no puede estar contenido en B y viceversa solo si
+        # la ratio de duración es razonable.
+        dur_a = fp_a.duration_seconds or 0
+        dur_b = fp_b.duration_seconds or 0
+        if dur_a > 0 and dur_b > 0:
+            ratio = min(dur_a, dur_b) / max(dur_a, dur_b)
+            # Si el video corto es <10% del largo, no puede alcanzar
+            # MATCH_RATIO_THRESHOLD a menos que el umbral sea muy bajo
+            if ratio < config.MATCH_RATIO_THRESHOLD * 0.5:
+                continue
+
+        result = _compare_with_matrices(
+            fp_a, fp_b, matrices[id(fp_a)], matrices[id(fp_b)]
+        )
         if result.is_duplicate:
             results.append(result)
             if show_progress:
@@ -223,6 +267,8 @@ def compare_all(
                     f"✅ {len(results)} dup | {fp_a.path.name[:15]}↔{fp_b.path.name[:15]}"
                 )
 
-    # Ordenar por similitud descendente
+    # Liberar matrices
+    del matrices
+
     results.sort(key=lambda r: r.match_ratio, reverse=True)
     return results
