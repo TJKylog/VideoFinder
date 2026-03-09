@@ -9,6 +9,7 @@ Incluye:
 """
 
 import base64
+import gc
 import html
 import os
 import sys
@@ -111,22 +112,18 @@ def _extract_thumbnails(
     return thumbnails
 
 
-def _get_thumbnails_for_videos(
-    matches: List[MatchResult],
+def _get_thumbnails_for_pair(
+    m: MatchResult,
+    cache: Dict[str, List[Tuple[str, float]]],
 ) -> Dict[str, List[Tuple[str, float]]]:
     """
-    Extrae thumbnails solo para los videos que aparecen en algún match.
+    Extrae thumbnails solo para los 2 videos de un match.
+    Usa *cache* para no re-extraer un video que ya apareció antes.
     """
-    paths = set()
-    for m in matches:
-        paths.add(str(m.video_a.path))
-        paths.add(str(m.video_b.path))
-
-    result: Dict[str, List[Tuple[str, float]]] = {}
-    for p in paths:
-        result[p] = _extract_thumbnails(Path(p))
-
-    return result
+    for p in (str(m.video_a.path), str(m.video_b.path)):
+        if p not in cache:
+            cache[p] = _extract_thumbnails(Path(p))
+    return cache
 
 
 def _similarity_color(ratio: float) -> str:
@@ -165,16 +162,16 @@ def _build_filmstrip(
             '</div>'
         )
 
-    frames_html = ""
+    parts: List[str] = []
     for b64, ts in thumbs:
-        frames_html += (
+        parts.append(
             '<div class="frame-cell">'
             f'<img src="data:image/jpeg;base64,{b64}" alt="frame" loading="lazy">'
             f'<span class="frame-ts">{_format_duration(ts)}</span>'
             '</div>'
         )
 
-    return f'<div class="filmstrip">{frames_html}</div>'
+    return f'<div class="filmstrip">{"" .join(parts)}</div>'
 
 
 def _build_match_card(
@@ -308,29 +305,14 @@ def generate_html_report(
     total_hashes = sum(len(fp.hashes) for fp in all_fingerprints if not fp.error)
     n_pairs = valid_videos * (valid_videos - 1) // 2 if valid_videos > 1 else 0
 
-    # ── Extraer thumbnails de los videos en los matches ──────────────────
     print("   📸 Extrayendo thumbnails para el reporte...")
-    thumbs_map = _get_thumbnails_for_videos(matches)
-
-    # ── Cards de cada match ──────────────────────────────────────────────
-    match_cards = ""
-    if matches:
-        for i, m in enumerate(matches, 1):
-            match_cards += _build_match_card(i, m, thumbs_map)
-    else:
-        match_cards = '''
-        <div class="no-matches">
-            <div class="no-matches-icon">✅</div>
-            <p>No se encontraron videos duplicados.
-               ¡Todos los videos son únicos!</p>
-        </div>'''
 
     # ── Tabla resumen rápida ─────────────────────────────────────────────
-    summary_rows = ""
+    summary_parts: List[str] = []
     for i, m in enumerate(matches, 1):
         pct = min(m.match_ratio * 100, 100)
         color = _similarity_color(m.match_ratio)
-        summary_rows += f'''
+        summary_parts.append(f'''
         <tr>
             <td>{i}</td>
             <td title="{html.escape(str(m.video_a.path))}">{html.escape(m.video_a.path.name)}</td>
@@ -348,20 +330,22 @@ def generate_html_report(
             </td>
             <td>{m.matched_frames}/{m.total_frames_a}</td>
             <td>{m.avg_hamming:.1f}</td>
-        </tr>'''
+        </tr>''')
+    summary_rows = "".join(summary_parts)
 
     # ── Tabla de errores ─────────────────────────────────────────────────
     error_section = ""
     if errored:
-        error_rows = ""
+        err_parts: List[str] = []
         for fp in all_fingerprints:
             if fp.error:
-                error_rows += f'''
+                err_parts.append(f'''
                 <tr>
                     <td title="{html.escape(str(fp.path))}"
                     >{html.escape(fp.path.name)}</td>
                     <td>{html.escape(fp.error)}</td>
-                </tr>'''
+                </tr>''')
+        error_rows = "".join(err_parts)
         error_section = f'''
         <h2 id="errors"><span class="section-icon">⚠️</span>
             Videos con Errores</h2>
@@ -371,10 +355,10 @@ def generate_html_report(
         </table>'''
 
     # ── Tabla de todos los videos ────────────────────────────────────────
-    all_rows = ""
+    all_parts: List[str] = []
     for fp in sorted(all_fingerprints, key=lambda f: f.path.name):
         status = "⚠️ Error" if fp.error else "✅ OK"
-        all_rows += f'''
+        all_parts.append(f'''
         <tr>
             <td title="{html.escape(str(fp.path))}">{html.escape(fp.path.name)}</td>
             <td>{_format_duration(fp.duration_seconds)}</td>
@@ -383,7 +367,8 @@ def generate_html_report(
             <td>{fp.fps:.1f}</td>
             <td>{len(fp.hashes)}</td>
             <td>{status}</td>
-        </tr>'''
+        </tr>''')
+    all_rows = "".join(all_parts)
 
     # ── Modo y parámetros ────────────────────────────────────────────────
     if config.USE_GPU:
@@ -508,8 +493,11 @@ def generate_html_report(
 
     cosine_metric = "coseno" if config.USE_GPU else "hamming"
 
-    # ── HTML completo ────────────────────────────────────────────────────
-    page = f'''<!DOCTYPE html>
+    # ── Escribir HTML por bloques al disco (streaming) ───────────────────
+    output_path = Path(output_dir) / config.REPORT_FILENAME
+    with open(output_path, "w", encoding="utf-8") as f:
+        # ── Head + CSS + apertura body ───────────────────────────────────
+        f.write(f'''<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -875,9 +863,40 @@ def generate_html_report(
     comparación visual. Los timestamps indican el momento exacto del
     frame en el video.
 </p>
+''')
+        # Liberar variables de secciones ya escritas
+        del pipeline_html, mode_badge, mode_name, mode_desc
+        del metric_info, how_step2, how_step3, how_step4
 
-{match_cards}
+        # ── Match cards: extracción lazy de thumbnails por tarjeta ───────
+        if matches:
+            thumbs_cache: Dict[str, List[Tuple[str, float]]] = {}
+            for i, m in enumerate(matches, 1):
+                _get_thumbnails_for_pair(m, thumbs_cache)
+                card_html = _build_match_card(i, m, thumbs_cache)
+                f.write(card_html)
+                # Liberar thumbnails de videos que ya no aparecerán
+                # en matches futuros para reducir memoria pico
+                remaining_paths = set()
+                for future_m in matches[i:]:
+                    remaining_paths.add(str(future_m.video_a.path))
+                    remaining_paths.add(str(future_m.video_b.path))
+                for cached_path in list(thumbs_cache):
+                    if cached_path not in remaining_paths:
+                        del thumbs_cache[cached_path]
+                del card_html
+                gc.collect()
+            del thumbs_cache
+        else:
+            f.write('''
+        <div class="no-matches">
+            <div class="no-matches-icon">✅</div>
+            <p>No se encontraron videos duplicados.
+               ¡Todos los videos son únicos!</p>
+        </div>''')
 
+        # ── Resto del documento ──────────────────────────────────────────
+        f.write(f'''
 <!-- ═══ Tabla resumen ═══ -->
 <h2 id="summary">
     <span class="section-icon">📊</span> Tabla Resumen
@@ -921,8 +940,6 @@ def generate_html_report(
 </footer>
 
 </body>
-</html>'''
+</html>''')
 
-    output_path = Path(output_dir) / config.REPORT_FILENAME
-    output_path.write_text(page, encoding="utf-8")
     return output_path
