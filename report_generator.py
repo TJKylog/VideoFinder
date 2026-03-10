@@ -8,11 +8,11 @@ Incluye:
   - Panel de metodología y parámetros utilizados.
 """
 
-import base64
 import gc
 import html
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -25,24 +25,20 @@ from frame_extractor import VideoFingerprint
 from hash_comparator import MatchResult
 
 
-@contextmanager
-def _suppress_stderr():
-    """Suprime stderr (warnings de ffmpeg/libav) mientras se usa OpenCV."""
-    stderr_fd = sys.stderr.fileno()
-    old_stderr_fd = os.dup(stderr_fd)
-    devnull = os.open(os.devnull, os.O_WRONLY)
+def _silence_opencv():
+    """Silencia los logs de OpenCV de forma thread-safe."""
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
     try:
-        os.dup2(devnull, stderr_fd)
-        yield
-    finally:
-        os.dup2(old_stderr_fd, stderr_fd)
-        os.close(old_stderr_fd)
-        os.close(devnull)
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+    except AttributeError:
+        pass
 
 # Número de thumbnails a extraer por video en el reporte
-_REPORT_NUM_FRAMES = 8
-_THUMB_WIDTH = 220
-_THUMB_QUALITY = 72
+_REPORT_NUM_FRAMES = 4
+_THUMB_WIDTH = 160
+_THUMB_QUALITY = 50
+_THUMBS_DIR_NAME = "report_thumbs"
 
 
 # ─── Utilidades ──────────────────────────────────────────────────────────────
@@ -59,31 +55,36 @@ def _format_duration(seconds: float) -> str:
 
 def _extract_thumbnails(
     video_path: Path,
+    thumbs_dir: Path,
     num_frames: int = _REPORT_NUM_FRAMES,
 ) -> List[Tuple[str, float]]:
     """
-    Extrae *num_frames* thumbnails equidistantes de un video.
+    Extrae *num_frames* thumbnails equidistantes de un video y los guarda
+    como archivos JPEG en thumbs_dir.
 
     Returns
     -------
-    list[(base64_jpeg, timestamp_seconds)]
+    list[(relative_path_str, timestamp_seconds)]
     """
     thumbnails: List[Tuple[str, float]] = []
     try:
-        with _suppress_stderr():
-            cap = cv2.VideoCapture(str(video_path))
-            if not cap.isOpened():
-                return thumbnails
+        _silence_opencv()
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return thumbnails
 
+        try:
             fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             duration = total_frames / fps if fps > 0 else 0.0
 
             if duration <= 0:
-                cap.release()
                 return thumbnails
 
             interval = duration / (num_frames + 1)
+            # Nombre base seguro para el archivo
+            safe_name = video_path.stem.replace(' ', '_')[:40]
+            vid_hash = abs(hash(str(video_path))) % 0xFFFF
 
             for i in range(1, num_frames + 1):
                 ts = interval * i
@@ -97,14 +98,16 @@ def _extract_thumbnails(
                 new_h = int(h * (new_w / w))
                 thumb = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-                ok, buf = cv2.imencode(
-                    '.jpg', thumb,
+                fname = f"{safe_name}_{vid_hash:04x}_{i:02d}.jpg"
+                fpath = thumbs_dir / fname
+                cv2.imwrite(
+                    str(fpath), thumb,
                     [cv2.IMWRITE_JPEG_QUALITY, _THUMB_QUALITY],
                 )
-                if ok:
-                    b64 = base64.b64encode(buf.tobytes()).decode('ascii')
-                    thumbnails.append((b64, ts))
-
+                # Ruta relativa al HTML (que estará junto a thumbs_dir)
+                rel_path = f"{_THUMBS_DIR_NAME}/{fname}"
+                thumbnails.append((rel_path, ts))
+        finally:
             cap.release()
     except Exception:
         pass
@@ -123,6 +126,40 @@ def _get_thumbnails_for_pair(
     for p in (str(m.video_a.path), str(m.video_b.path)):
         if p not in cache:
             cache[p] = _extract_thumbnails(Path(p))
+    return cache
+
+
+def _prefetch_all_thumbnails(
+    matches: List[MatchResult],
+    thumbs_dir: Path,
+) -> Dict[str, List[Tuple[str, float]]]:
+    """
+    Extrae thumbnails de todos los videos en los matches en paralelo
+    y los guarda como archivos JPEG en thumbs_dir.
+    """
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    unique_paths = set()
+    for m in matches:
+        unique_paths.add(str(m.video_a.path))
+        unique_paths.add(str(m.video_b.path))
+
+    cache: Dict[str, List[Tuple[str, float]]] = {}
+    path_list = list(unique_paths)
+
+    workers = min(8, len(path_list))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_extract_thumbnails, Path(p), thumbs_dir): p
+            for p in path_list
+        }
+        for future in futures:
+            p = futures[future]
+            try:
+                cache[p] = future.result(timeout=60)
+            except Exception:
+                cache[p] = []
+
     return cache
 
 
@@ -163,10 +200,10 @@ def _build_filmstrip(
         )
 
     parts: List[str] = []
-    for b64, ts in thumbs:
+    for rel_path, ts in thumbs:
         parts.append(
             '<div class="frame-cell">'
-            f'<img src="data:image/jpeg;base64,{b64}" alt="frame" loading="lazy">'
+            f'<img src="{html.escape(rel_path)}" alt="frame" loading="lazy">'
             f'<span class="frame-ts">{_format_duration(ts)}</span>'
             '</div>'
         )
@@ -292,10 +329,17 @@ def generate_html_report(
     all_fingerprints: List[VideoFingerprint],
     output_dir: str,
     scan_time_seconds: float = 0.0,
+    max_visual_matches: int = 100,
 ) -> Path:
     """
-    Genera un archivo HTML visual con los duplicados encontrados,
-    incluyendo thumbnails de frames y métricas de comparación.
+    Genera un archivo HTML visual con los duplicados encontrados.
+    Thumbnails se guardan como archivos JPEG en una subcarpeta.
+
+    Parameters
+    ----------
+    max_visual_matches : int
+        Máximo de comparaciones visuales con thumbnails en el reporte.
+        Las demás se muestran solo en la tabla resumen.
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total_videos = len(all_fingerprints)
@@ -306,6 +350,10 @@ def generate_html_report(
     n_pairs = valid_videos * (valid_videos - 1) // 2 if valid_videos > 1 else 0
 
     print("   📸 Extrayendo thumbnails para el reporte...")
+    visual_matches = matches[:max_visual_matches]
+    if len(matches) > max_visual_matches:
+        print(f"   ℹ️  Mostrando thumbnails para los {max_visual_matches} mejores matches "
+              f"(de {len(matches)} totales). Usa --max-report para ajustar.")
 
     # ── Tabla resumen rápida ─────────────────────────────────────────────
     summary_parts: List[str] = []
@@ -868,25 +916,25 @@ def generate_html_report(
         del pipeline_html, mode_badge, mode_name, mode_desc
         del metric_info, how_step2, how_step3, how_step4
 
-        # ── Match cards: extracción lazy de thumbnails por tarjeta ───────
-        if matches:
-            thumbs_cache: Dict[str, List[Tuple[str, float]]] = {}
-            for i, m in enumerate(matches, 1):
-                _get_thumbnails_for_pair(m, thumbs_cache)
+        # ── Match cards: thumbnails guardados como archivos ─────────────
+        if visual_matches:
+            thumbs_dir = Path(output_dir) / _THUMBS_DIR_NAME
+            thumbs_cache = _prefetch_all_thumbnails(visual_matches, thumbs_dir)
+            for i, m in enumerate(visual_matches, 1):
                 card_html = _build_match_card(i, m, thumbs_cache)
                 f.write(card_html)
-                # Liberar thumbnails de videos que ya no aparecerán
-                # en matches futuros para reducir memoria pico
-                remaining_paths = set()
-                for future_m in matches[i:]:
-                    remaining_paths.add(str(future_m.video_a.path))
-                    remaining_paths.add(str(future_m.video_b.path))
-                for cached_path in list(thumbs_cache):
-                    if cached_path not in remaining_paths:
-                        del thumbs_cache[cached_path]
                 del card_html
-                gc.collect()
             del thumbs_cache
+            if len(matches) > max_visual_matches:
+                f.write(f'''
+        <div class="no-matches" style="border-color:var(--accent)">
+            <div class="no-matches-icon">📊</div>
+            <p>Se muestran {max_visual_matches} comparaciones visuales de
+               {len(matches)} totales.<br>
+               El resto se puede consultar en la
+               <a href="#summary" style="color:var(--accent)">tabla resumen</a>.
+               Usa <code>--max-report N</code> para ver más.</p>
+        </div>''')
         else:
             f.write('''
         <div class="no-matches">

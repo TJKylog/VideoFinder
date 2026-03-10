@@ -126,6 +126,13 @@ def parse_args() -> argparse.Namespace:
         default=config.COSINE_THRESHOLD,
         help=f"Umbral de similitud coseno para modo GPU (default: {config.COSINE_THRESHOLD}).",
     )
+    parser.add_argument(
+        "--max-report",
+        type=int,
+        default=100,
+        help="Máximo de comparaciones visuales (con thumbnails) en el reporte HTML "
+             "(default: 100). El resto aparece en la tabla resumen.",
+    )
     return parser.parse_args()
 
 
@@ -355,6 +362,7 @@ def main() -> None:
             all_fingerprints=fingerprints,
             output_dir=output_dir,
             scan_time_seconds=t_total,
+            max_visual_matches=args.max_report,
         )
         print(f"📄 Reporte generado: {report_path}")
 

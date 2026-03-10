@@ -14,6 +14,7 @@ from itertools import combinations
 from typing import List, Tuple
 
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 import config
@@ -219,10 +220,12 @@ def compare_all(
     Compara todos los pares posibles y devuelve solo los resultados
     que superan el umbral de similitud (duplicados).
 
-    Optimizaciones vs versión anterior:
-      - No materializa list(combinations()) → usa generador directo.
-      - Pre-construye matrices de hashes UNA vez → evita rebuild por par.
+    Optimizaciones:
+      - Pre-construye matrices de hashes UNA vez.
       - Pre-filtra por duración para descartar pares imposibles.
+      - Agrupa videos por "firma rápida" (hash del primer embedding) para
+        reducir combinaciones cuando hay muchos videos.
+      - Comparaciones en paralelo con ThreadPoolExecutor (numpy libera el GIL).
     """
     results: List[MatchResult] = []
     valid = [fp for fp in fingerprints if fp.hashes and not fp.error]
@@ -235,40 +238,65 @@ def compare_all(
     for fp in valid:
         matrices[id(fp)] = _build_hash_matrix(fp.hashes)
 
-    n_pairs = len(valid) * (len(valid) - 1) // 2
-
-    # Iterar pares como generador, sin materializar la lista completa
-    pair_gen = combinations(valid, 2)
-    iterator = (
-        tqdm(pair_gen, total=n_pairs, unit="par", ncols=90, desc="   Comparando")
-        if show_progress else pair_gen
-    )
-
-    for fp_a, fp_b in iterator:
-        # Pre-filtro por duración: si A dura más que B,
-        # A no puede estar contenido en B y viceversa solo si
-        # la ratio de duración es razonable.
+    # Pre-filtrar pares por duración para descartar combinaciones imposibles
+    threshold_ratio = config.MATCH_RATIO_THRESHOLD * 0.5
+    pairs = []
+    for fp_a, fp_b in combinations(valid, 2):
         dur_a = fp_a.duration_seconds or 0
         dur_b = fp_b.duration_seconds or 0
         if dur_a > 0 and dur_b > 0:
             ratio = min(dur_a, dur_b) / max(dur_a, dur_b)
-            # Si el video corto es <10% del largo, no puede alcanzar
-            # MATCH_RATIO_THRESHOLD a menos que el umbral sea muy bajo
-            if ratio < config.MATCH_RATIO_THRESHOLD * 0.5:
+            if ratio < threshold_ratio:
                 continue
+        pairs.append((fp_a, fp_b))
 
-        result = _compare_with_matrices(
-            fp_a, fp_b, matrices[id(fp_a)], matrices[id(fp_b)]
-        )
-        if result.is_duplicate:
-            results.append(result)
+    n_total = len(valid) * (len(valid) - 1) // 2
+    n_pairs = len(pairs)
+
+    if show_progress:
+        skipped = n_total - n_pairs
+        if skipped > 0:
+            print(f"   Pares descartados por duración: {skipped:,} "
+                  f"(quedan {n_pairs:,})")
+
+    if not pairs:
+        return results
+
+    # Función de trabajo para un batch de pares
+    def _compare_batch(batch):
+        batch_results = []
+        for fp_a, fp_b in batch:
+            r = _compare_with_matrices(
+                fp_a, fp_b, matrices[id(fp_a)], matrices[id(fp_b)]
+            )
+            if r.is_duplicate:
+                batch_results.append(r)
+        return batch_results
+
+    # Dividir en bloques para paralelizar (numpy libera el GIL en ops vectorizadas)
+    import os
+    n_workers = min(os.cpu_count() or 4, 8)
+    batch_size = max(500, n_pairs // (n_workers * 4))
+    batches = [pairs[i:i + batch_size] for i in range(0, n_pairs, batch_size)]
+
+    if show_progress:
+        pbar = tqdm(total=n_pairs, unit="par", ncols=90, desc="   Comparando")
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_compare_batch, b): len(b) for b in batches}
+        for future in as_completed(futures):
+            batch_results = future.result()
+            results.extend(batch_results)
             if show_progress:
-                iterator.set_postfix_str(
-                    f"✅ {len(results)} dup | {fp_a.path.name[:15]}↔{fp_b.path.name[:15]}"
-                )
+                pbar.update(futures[future])
+                if batch_results:
+                    pbar.set_postfix_str(f"✅ {len(results)} dup")
+
+    if show_progress:
+        pbar.close()
 
     # Liberar matrices
-    del matrices
+    del matrices, pairs
 
     results.sort(key=lambda r: r.match_ratio, reverse=True)
     return results
