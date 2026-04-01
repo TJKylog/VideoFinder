@@ -150,8 +150,8 @@ def populate_thumbnails(db_path: str, thumbs_map: dict, thumbs_dir: str) -> None
 
 # ─── Consultas para la GUI ──────────────────────────────────────────────────
 
-def get_all_matches(db_path: str) -> List[dict]:
-    """Devuelve todos los matches con info de ambos videos."""
+def get_all_matches(db_path: str, limit: int = 200, offset: int = 0) -> List[dict]:
+    """Devuelve matches con info de ambos videos, paginados."""
     conn = _get_connection(db_path)
     try:
         rows = conn.execute("""
@@ -171,8 +171,18 @@ def get_all_matches(db_path: str) -> List[dict]:
             JOIN videos va ON m.video_a_id = va.id
             JOIN videos vb ON m.video_b_id = vb.id
             ORDER BY m.match_ratio DESC
-        """).fetchall()
+            LIMIT ? OFFSET ?
+        """, (limit, offset)).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_match_count(db_path: str) -> int:
+    """Devuelve el numero total de matches."""
+    conn = _get_connection(db_path)
+    try:
+        return conn.execute("SELECT count(*) FROM matches").fetchone()[0]
     finally:
         conn.close()
 

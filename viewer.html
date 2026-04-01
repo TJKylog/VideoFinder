@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FindDuplicatedVideos - Visor</title>
+    <style>
+        :root {
+            --bg: #0f0f1a;
+            --bg2: #161625;
+            --bg3: #1c1c30;
+            --accent: #e94560;
+            --accent2: #0f3460;
+            --text: #e8e8f0;
+            --dim: #8888aa;
+            --muted: #555577;
+            --border: #2a2a42;
+            --blue: #3498db;
+            --purple: #9b59b6;
+            --red: #c0392b;
+            --green: #27ae60;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 1rem;
+        }
+
+        h1 {
+            color: var(--accent);
+            font-size: 1.5rem;
+            margin-bottom: .3rem;
+        }
+
+        .subtitle {
+            color: var(--dim);
+            font-size: .85rem;
+            margin-bottom: 1rem;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+            margin-bottom: 1rem;
+            max-height: 45vh;
+            overflow-y: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg3);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        th {
+            background: var(--accent2);
+            color: var(--accent);
+            padding: .6rem .5rem;
+            text-align: left;
+            font-size: .75rem;
+            text-transform: uppercase;
+            letter-spacing: .03em;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        td {
+            padding: .45rem .5rem;
+            border-bottom: 1px solid var(--bg);
+            font-size: .82rem;
+            max-width: 250px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        tr {
+            cursor: pointer;
+            transition: background .15s;
+        }
+
+        tr:hover td {
+            background: var(--bg2);
+        }
+
+        tr.selected td {
+            background: var(--accent2);
+        }
+
+        tr.deleted td {
+            opacity: 0.4;
+        }
+
+        .pct-bar {
+            background: var(--border);
+            border-radius: 3px;
+            width: 70px;
+            height: 8px;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: .4rem;
+            overflow: hidden;
+        }
+
+        .pct-fill {
+            height: 100%;
+            border-radius: 3px;
+        }
+
+        .pagination {
+            display: flex;
+            align-items: center;
+            gap: .5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .pagination button {
+            background: var(--bg3);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: .4rem .8rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: .82rem;
+        }
+
+        .pagination button:disabled {
+            opacity: .4;
+            cursor: default;
+        }
+
+        .pagination button:hover:not(:disabled) {
+            border-color: var(--accent);
+        }
+
+        .page-info {
+            color: var(--dim);
+            font-size: .82rem;
+        }
+
+        .detail {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.2rem;
+            margin-top: 1rem;
+            display: none;
+        }
+
+        .detail.visible {
+            display: block;
+        }
+
+        .detail-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .detail-pct {
+            font-size: 1.8rem;
+            font-weight: 800;
+        }
+
+        .detail-meta {
+            color: var(--dim);
+            font-size: .82rem;
+        }
+
+        .video-panels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        @media(max-width:768px) {
+            .video-panels {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .vpanel {
+            background: var(--bg3);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .vpanel-header {
+            padding: .5rem .8rem;
+            display: flex;
+            align-items: center;
+            gap: .5rem;
+            font-size: .82rem;
+        }
+
+        .vpanel-a .vpanel-header {
+            background: #1a2540;
+            border-left: 3px solid var(--blue);
+        }
+
+        .vpanel-b .vpanel-header {
+            background: #2a1a30;
+            border-left: 3px solid var(--purple);
+        }
+
+        .badge {
+            font-weight: 800;
+            font-size: .7rem;
+            padding: .1rem .4rem;
+            border-radius: 4px;
+            color: #fff;
+        }
+
+        .badge-a {
+            background: var(--blue);
+        }
+
+        .badge-b {
+            background: var(--purple);
+        }
+
+        .vname {
+            font-weight: 600;
+        }
+
+        .vmeta {
+            color: var(--dim);
+            font-size: .72rem;
+        }
+
+        .vpath {
+            padding: .3rem .8rem;
+            font-size: .68rem;
+            color: var(--muted);
+            word-break: break-all;
+        }
+
+        .thumbs {
+            display: flex;
+            gap: 6px;
+            padding: .5rem;
+            overflow-x: auto;
+            min-height: 100px;
+            align-items: flex-start;
+        }
+
+        .thumbs::-webkit-scrollbar {
+            height: 6px;
+        }
+
+        .thumbs::-webkit-scrollbar-thumb {
+            background: var(--accent);
+            border-radius: 3px;
+        }
+
+        .thumb-cell {
+            flex-shrink: 0;
+            text-align: center;
+        }
+
+        .thumb-cell img {
+            border-radius: 4px;
+            height: 100px;
+            width: auto;
+            border: 2px solid transparent;
+            transition: border-color .2s;
+        }
+
+        .thumb-cell img:hover {
+            border-color: var(--accent);
+        }
+
+        .thumb-ts {
+            font-size: .65rem;
+            color: var(--dim);
+            font-family: monospace;
+            margin-top: .2rem;
+        }
+
+        .loading {
+            color: var(--dim);
+            padding: 1rem;
+            text-align: center;
+            font-size: .85rem;
+        }
+
+        .actions {
+            display: flex;
+            gap: .5rem;
+            margin-top: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: .5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: .85rem;
+            color: #fff;
+            transition: opacity .2s;
+        }
+
+        .btn:disabled {
+            opacity: .4;
+            cursor: default;
+        }
+
+        .btn-red {
+            background: var(--red);
+        }
+
+        .btn-purple {
+            background: var(--purple);
+        }
+
+        .btn:hover:not(:disabled) {
+            opacity: .85;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            padding: .6rem 1.2rem;
+            border-radius: 8px;
+            font-size: .85rem;
+            color: #fff;
+            z-index: 999;
+            transform: translateY(100px);
+            transition: transform .3s;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+        }
+
+        .toast-ok {
+            background: var(--green);
+        }
+
+        .toast-err {
+            background: var(--red);
+        }
+    </style>
+</head>
+
+<body>
+    <h1>FindDuplicatedVideos - Visor de Duplicados</h1>
+    <div class="subtitle" id="subtitle">Cargando...</div>
+
+    <div class="pagination">
+        <button id="btn-prev" onclick="prevPage()" disabled>&lt;&lt; Anterior</button>
+        <span class="page-info" id="page-info"></span>
+        <button id="btn-next" onclick="nextPage()" disabled>Siguiente &gt;&gt;</button>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Video A</th>
+                    <th>Dur.</th>
+                    <th>Tam.</th>
+                    <th>Video B</th>
+                    <th>Dur.</th>
+                    <th>Tam.</th>
+                    <th>Similitud</th>
+                    <th>Estado</th>
+                </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+        </table>
+    </div>
+
+    <div class="detail" id="detail">
+        <div class="detail-header">
+            <span class="detail-pct" id="d-pct"></span>
+            <span class="detail-meta" id="d-meta"></span>
+        </div>
+        <div class="video-panels">
+            <div class="vpanel vpanel-a">
+                <div class="vpanel-header">
+                    <span class="badge badge-a">A</span>
+                    <span class="vname" id="d-name-a"></span>
+                    <span class="vmeta" id="d-vmeta-a"></span>
+                </div>
+                <div class="vpath" id="d-path-a"></div>
+                <div class="thumbs" id="thumbs-a">
+                    <div class="loading">Cargando thumbnails...</div>
+                </div>
+            </div>
+            <div class="vpanel vpanel-b">
+                <div class="vpanel-header">
+                    <span class="badge badge-b">B</span>
+                    <span class="vname" id="d-name-b"></span>
+                    <span class="vmeta" id="d-vmeta-b"></span>
+                </div>
+                <div class="vpath" id="d-path-b"></div>
+                <div class="thumbs" id="thumbs-b">
+                    <div class="loading">Cargando thumbnails...</div>
+                </div>
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn btn-red" id="btn-del-a" onclick="deleteVideo('a')">Eliminar Video A</button>
+            <button class="btn btn-purple" id="btn-del-b" onclick="deleteVideo('b')">Eliminar Video B</button>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        let currentPage = 0, totalPages = 1, pageLimit = 50, totalMatches = 0;
+        let matches = [], selectedIdx = -1, selectedMatch = null;
+
+        function fmtDur(s) {
+            const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+            const mm = String(m).padStart(2, '0'), ss = String(sec).padStart(2, '0');
+            return h ? `${String(h).padStart(2, '0')}:${mm}:${ss}` : `${mm}:${ss}`;
+        }
+        function pctColor(r) {
+            if (r >= .8) return '#e74c3c'; if (r >= .6) return '#e67e22';
+            if (r >= .4) return '#f39c12'; return '#2ecc71';
+        }
+        function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+        async function loadPage(page) {
+            currentPage = page;
+            const res = await fetch(`/api/matches?page=${page}&limit=${pageLimit}`);
+            const data = await res.json();
+            matches = data.matches; totalMatches = data.total;
+            totalPages = Math.max(1, Math.ceil(totalMatches / pageLimit));
+            document.getElementById('subtitle').textContent =
+                `${totalMatches.toLocaleString()} pares duplicados encontrados`;
+            document.getElementById('page-info').textContent =
+                `Pagina ${page + 1} de ${totalPages}`;
+            document.getElementById('btn-prev').disabled = (page <= 0);
+            document.getElementById('btn-next').disabled = (page + 1 >= totalPages);
+            renderTable();
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('tbody');
+            tbody.innerHTML = '';
+            const offset = currentPage * pageLimit;
+            matches.forEach((m, i) => {
+                const pct = Math.min(m.match_ratio * 100, 100);
+                const color = pctColor(m.match_ratio);
+                let estado = '';
+                if (m.va_del) estado += 'A eliminado';
+                if (m.vb_del) estado += (estado ? ' / ' : '') + ' B eliminado';
+                if (!estado) estado = 'Pendiente';
+                const cls = (m.va_del || m.vb_del) ? 'deleted' : '';
+                const tr = document.createElement('tr');
+                tr.className = cls; tr.dataset.idx = i;
+                tr.onclick = () => selectMatch(i);
+                tr.innerHTML = `
+      <td>${offset + i + 1}</td>
+      <td title="${esc(m.va_path)}">${esc(m.va_name)}</td>
+      <td>${fmtDur(m.va_dur)}</td>
+      <td>${m.va_size.toFixed(1)} MB</td>
+      <td title="${esc(m.vb_path)}">${esc(m.vb_name)}</td>
+      <td>${fmtDur(m.vb_dur)}</td>
+      <td>${m.vb_size.toFixed(1)} MB</td>
+      <td>
+        <span class="pct-bar"><span class="pct-fill" style="width:${pct}%;background:${color}"></span></span>
+        <span style="color:${color};font-weight:700">${pct.toFixed(1)}%</span>
+      </td>
+      <td>${estado}</td>`;
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function selectMatch(idx) {
+            selectedIdx = idx; selectedMatch = matches[idx]; const m = selectedMatch;
+            document.querySelectorAll('#tbody tr').forEach(tr => tr.classList.remove('selected'));
+            document.querySelector(`#tbody tr[data-idx="${idx}"]`)?.classList.add('selected');
+            const panel = document.getElementById('detail'); panel.classList.add('visible');
+            const pct = Math.min(m.match_ratio * 100, 100);
+            document.getElementById('d-pct').textContent = pct.toFixed(1) + '%';
+            document.getElementById('d-pct').style.color = pctColor(m.match_ratio);
+            document.getElementById('d-meta').textContent =
+                `Frames: ${m.matched_frames}/${m.total_frames_a}  |  Hamming avg: ${m.avg_hamming.toFixed(1)}`;
+            document.getElementById('d-name-a').textContent = m.va_name;
+            document.getElementById('d-vmeta-a').textContent =
+                `${fmtDur(m.va_dur)} · ${m.va_size.toFixed(1)} MB · ${m.va_w}x${m.va_h}`;
+            document.getElementById('d-path-a').textContent = m.va_path;
+            document.getElementById('d-name-b').textContent = m.vb_name;
+            document.getElementById('d-vmeta-b').textContent =
+                `${fmtDur(m.vb_dur)} · ${m.vb_size.toFixed(1)} MB · ${m.vb_w}x${m.vb_h}`;
+            document.getElementById('d-path-b').textContent = m.vb_path;
+            document.getElementById('btn-del-a').disabled = !!m.va_del;
+            document.getElementById('btn-del-b').disabled = !!m.vb_del;
+            loadThumbs('thumbs-a', m.va_id);
+            loadThumbs('thumbs-b', m.vb_id);
+        }
+
+        async function loadThumbs(id, videoId) {
+            const el = document.getElementById(id);
+            el.innerHTML = '<div class="loading">Cargando...</div>';
+            try {
+                const res = await fetch(`/api/thumbnails?video_id=${videoId}`);
+                const data = await res.json();
+                if (!data.thumbs.length) { el.innerHTML = '<div class="loading">Sin thumbnails</div>'; return; }
+                el.innerHTML = data.thumbs.map(t =>
+                    `<div class="thumb-cell"><img src="${t.src}" alt="thumb"><div class="thumb-ts">${t.ts}</div></div>`
+                ).join('');
+            } catch (e) { el.innerHTML = '<div class="loading">Error cargando thumbnails</div>'; }
+        }
+
+        function showToast(msg, ok) {
+            const t = document.getElementById('toast');
+            t.textContent = msg; t.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
+            setTimeout(() => t.classList.remove('show'), 3000);
+        }
+
+        async function deleteVideo(which) {
+            if (!selectedMatch) return; const m = selectedMatch;
+            const name = which === 'a' ? m.va_name : m.vb_name;
+            const path = which === 'a' ? m.va_path : m.vb_path;
+            const vid_id = which === 'a' ? m.va_id : m.vb_id;
+            if (!confirm(`Eliminar permanentemente?\n\n${name}\n${path}`)) return;
+            try {
+                const res = await fetch('/api/delete', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ video_id: vid_id, video_path: path })
+                });
+                const data = await res.json();
+                if (data.ok) { showToast(`${name} eliminado`, true); loadPage(currentPage); }
+                else { showToast(`Error: ${data.error}`, false); }
+            } catch (e) { showToast('Error de conexion', false); }
+        }
+
+        function prevPage() { if (currentPage > 0) loadPage(currentPage - 1); }
+        function nextPage() { if (currentPage + 1 < totalPages) loadPage(currentPage + 1); }
+
+        loadPage(0);
+    </script>
+</body>
+
+</html>
