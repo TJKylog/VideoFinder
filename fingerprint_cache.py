@@ -62,7 +62,7 @@ class FingerprintCache:
                 pickle.dump(self._data, f, protocol=pickle.HIGHEST_PROTOCOL)
             self._dirty = False
         except Exception as exc:
-            print(f"⚠️  No se pudo guardar la caché: {exc}")
+            print(f"[AVISO] No se pudo guardar la cache: {exc}")
 
     def get(self, video_path: Path) -> Optional[VideoFingerprint]:
         """

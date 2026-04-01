@@ -38,7 +38,7 @@ class MatchResult:
 
     def summary(self) -> str:
         return (
-            f"{'✅ DUPLICADO' if self.is_duplicate else '❌ Sin coincidencia'}  "
+            f"{'[DUPLICADO]' if self.is_duplicate else '[SIN COINCIDENCIA]'}  "
             f"similitud={self.match_ratio:.1%}  "
             f"frames={self.matched_frames}/{self.total_frames_a}  "
             f"hamming_avg={self.avg_hamming:.1f}\n"
@@ -290,7 +290,7 @@ def compare_all(
             if show_progress:
                 pbar.update(futures[future])
                 if batch_results:
-                    pbar.set_postfix_str(f"✅ {len(results)} dup")
+                    pbar.set_postfix_str(f"OK: {len(results)} dup")
 
     if show_progress:
         pbar.close()

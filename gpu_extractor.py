@@ -2,7 +2,7 @@
 Extractor de fingerprints usando GPU con PyTorch + CNN preentrenada.
 
 Usa MobileNetV3-Small para generar embeddings densos de 576 dimensiones
-por frame. Es ~5-10× más rápido que pHash cuando hay GPU disponible y
+por frame. Es ~5-10x más rápido que pHash cuando hay GPU disponible y
 produce embeddings de mayor calidad para detección de duplicados.
 
 Optimizaciones:

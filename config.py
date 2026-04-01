@@ -67,4 +67,4 @@ COSINE_THRESHOLD = 0.85
 MAX_WORKERS = None
 
 # ─── Reporte ────────────────────────────────────────────────────────────────
-REPORT_FILENAME = "duplicates_report.html"
+# (El reporte HTML fue eliminado; los resultados se guardan en SQLite)

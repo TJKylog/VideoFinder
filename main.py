@@ -26,8 +26,9 @@ import config
 from fingerprint_cache import FingerprintCache
 from frame_extractor import VideoFingerprint, extract_fingerprint
 from hash_comparator import MatchResult, compare_all, compare_pair
-from report_generator import generate_html_report
+from report_generator import generate_report
 from video_scanner import scan_videos
+import db_manager
 
 # GPU extractor se importa condicionalmente
 _gpu_extract_fn = None
@@ -36,7 +37,7 @@ _gpu_extract_fn = None
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "🎬 FindDuplicatedVideos — Detecta videos duplicados o que "
+            "FindDuplicatedVideos — Detecta videos duplicados o que "
             "contienen fragmentos de otros videos usando hash perceptual."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -96,7 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-report",
         action="store_true",
-        help="No generar el reporte HTML.",
+        help="No generar la base de datos ni thumbnails.",
     )
     parser.add_argument(
         "--no-cache",
@@ -126,12 +127,12 @@ def parse_args() -> argparse.Namespace:
         default=config.COSINE_THRESHOLD,
         help=f"Umbral de similitud coseno para modo GPU (default: {config.COSINE_THRESHOLD}).",
     )
+
     parser.add_argument(
-        "--max-report",
-        type=int,
-        default=100,
-        help="Máximo de comparaciones visuales (con thumbnails) en el reporte HTML "
-             "(default: 100). El resto aparece en la tabla resumen.",
+        "--viewer",
+        action="store_true",
+        help="Abrir la ventana gráfica para revisar y eliminar duplicados "
+             "(requiere una ejecución previa con BD generada).",
     )
     return parser.parse_args()
 
@@ -163,12 +164,24 @@ def main() -> None:
     folder = Path(args.folder).resolve()
     output_dir = args.output or str(folder)
 
+    # ── Modo visor: abrir GUI directamente ───────────────────────────────
+    if args.viewer:
+        db_path = db_manager.get_db_path_from_dir(output_dir)
+        if not Path(db_path).exists():
+            print("[ERROR] No se encontro la BD de duplicados.")
+            print(f"   Ejecuta primero el analisis en: {folder}")
+            sys.exit(1)
+        from viewer_gui import launch_viewer
+        print(f"[VISOR] Abriendo visor de duplicados: {db_path}")
+        launch_viewer(db_path)
+        return
+
     # ── 1. Escanear videos ───────────────────────────────────────────────
-    print(f"\n📁 Escaneando: {folder}")
+    print(f"\n[SCAN] Escaneando: {folder}")
     videos = scan_videos(str(folder))
 
     if not videos:
-        print("⚠️  No se encontraron archivos de video.")
+        print("[AVISO] No se encontraron archivos de video.")
         sys.exit(0)
 
     print(f"   Encontrados: {len(videos)} videos\n")
@@ -183,11 +196,11 @@ def main() -> None:
                 get_gpu_device_name,
             )
             device_name = get_gpu_device_name()
-            print(f"🚀 Modo GPU activado: {device_name}")
+            print(f"[GPU] Modo GPU activado: {device_name}")
             print(f"   Batch size: {config.GPU_BATCH_SIZE} | Cosine threshold: {config.COSINE_THRESHOLD}\n")
             extract_fn = extract_fingerprint_gpu
         except ImportError as e:
-            print(f"⚠️  No se pudo activar GPU: {e}")
+            print(f"[AVISO] No se pudo activar GPU: {e}")
             print("   Continuando en modo CPU...\n")
             config.USE_GPU = False
 
@@ -195,7 +208,7 @@ def main() -> None:
     cache = FingerprintCache(str(folder))
     if args.clear_cache:
         cache.clear()
-        print("🗑  Caché eliminada.\n")
+        print("[CACHE] Cache eliminada.\n")
 
     # Separar videos ya cacheados de los que faltan
     cached_fps: List[VideoFingerprint] = []
@@ -208,7 +221,7 @@ def main() -> None:
             videos_to_process.append(v)
 
     if cached_fps:
-        print(f"💾 Caché: {len(cached_fps)} videos ya procesados, "
+        print(f"[CACHE] Cache: {len(cached_fps)} videos ya procesados, "
               f"{len(videos_to_process)} pendientes.\n")
 
     # ── 3. Extraer fingerprints (paralelo) ───────────────────────────────
@@ -216,7 +229,7 @@ def main() -> None:
     t_start = time.time()
 
     if videos_to_process:
-        print(f"🔍 Extrayendo huellas digitales de {len(videos_to_process)} videos...")
+        print(f"[PROCESO] Extrayendo huellas digitales de {len(videos_to_process)} videos...")
 
         if config.USE_GPU:
             # GPU: pipeline paralelo (lectura I/O en hilos + GPU en main thread)
@@ -228,7 +241,7 @@ def main() -> None:
             def _sigint_handler(sig, frame):
                 nonlocal interrupted
                 interrupted = True
-                print("\n\n⚠️  Interrumpido. Guardando caché...")
+                print("\n\n[AVISO] Interrumpido. Guardando cache...")
 
             signal.signal(signal.SIGINT, _sigint_handler)
 
@@ -245,8 +258,8 @@ def main() -> None:
                 if processed_count % save_every == 0:
                     cache.save()
 
-                status = (f"✅ {len(fp.hashes)} emb"
-                          if not fp.error else f"❌ {fp.error[:30]}")
+                status = (f"OK: {len(fp.hashes)} emb"
+                          if not fp.error else f"ERROR: {fp.error[:30]}")
                 pbar.set_postfix_str(f"{fp.path.name[:25]} → {status}")
                 pbar.update(1)
 
@@ -260,10 +273,10 @@ def main() -> None:
                 pbar.close()
                 signal.signal(signal.SIGINT, original_sigint)
                 cache.save()
-                print(f"\n   💾 Caché guardada ({cache.size} videos totales)")
+                print(f"\n   [CACHE] Cache guardada ({cache.size} videos totales)")
 
             if interrupted:
-                print("\n⚠️  Proceso interrumpido. Se guardó el progreso en caché.")
+                print("\n[AVISO] Proceso interrumpido. Se guardo el progreso en cache.")
                 print("   Ejecuta el mismo comando de nuevo para continuar.\n")
                 sys.exit(130)
         else:
@@ -278,7 +291,7 @@ def main() -> None:
             def _sigint_handler(sig, frame):
                 nonlocal interrupted
                 interrupted = True
-                print("\n\n⚠️  Interrumpido. Guardando caché...")
+                print("\n\n[AVISO] Interrumpido. Guardando cache...")
 
             signal.signal(signal.SIGINT, _sigint_handler)
 
@@ -303,17 +316,17 @@ def main() -> None:
                             if processed_count % save_every == 0:
                                 cache.save()
 
-                            status = (f"✅ {len(fp.hashes)} hashes"
-                                      if not fp.error else f"❌ {fp.error[:30]}")
+                            status = (f"OK: {len(fp.hashes)} hashes"
+                                      if not fp.error else f"ERROR: {fp.error[:30]}")
                             pbar.set_postfix_str(f"{fp.path.name[:25]} → {status}")
                             pbar.update(1)
             finally:
                 signal.signal(signal.SIGINT, original_sigint)
                 cache.save()
-                print(f"\n   💾 Caché guardada ({cache.size} videos totales)")
+                print(f"\n   [CACHE] Cache guardada ({cache.size} videos totales)")
 
             if interrupted:
-                print("\n⚠️  Proceso interrumpido. Se guardó el progreso en caché.")
+                print("\n[AVISO] Proceso interrumpido. Se guardo el progreso en cache.")
                 print("   Ejecuta el mismo comando de nuevo para continuar.\n")
                 sys.exit(130)
 
@@ -321,21 +334,21 @@ def main() -> None:
     valid = [fp for fp in fingerprints if fp.hashes and not fp.error]
     errored = [fp for fp in fingerprints if fp.error]
 
-    print(f"\n   ✅ Procesados: {len(valid)} videos correctamente")
+    print(f"\n   [OK] Procesados: {len(valid)} videos correctamente")
     if errored:
-        print(f"   ⚠️  Con errores: {len(errored)} videos")
+        print(f"   [AVISO] Con errores: {len(errored)} videos")
         for fp in errored[:10]:
             print(f"      └─ {fp.path.name}: {fp.error}")
         if len(errored) > 10:
             print(f"      ... y {len(errored) - 10} más")
 
     if len(valid) < 2:
-        print("\n⚠️  Se necesitan al menos 2 videos válidos para comparar.")
+        print("\n[AVISO] Se necesitan al menos 2 videos validos para comparar.")
         sys.exit(0)
 
     # ── 4. Comparar todos los pares ──────────────────────────────────────
     n_pairs = len(valid) * (len(valid) - 1) // 2
-    print(f"\n🔄 Comparando {n_pairs:,} pares de videos...")
+    print(f"\n[COMPARACION] Comparando {n_pairs:,} pares de videos...")
     t_compare = time.time()
 
     matches = compare_all(fingerprints)
@@ -346,25 +359,24 @@ def main() -> None:
     # ── 5. Mostrar resultados ────────────────────────────────────────────
     print(f"\n{'='*60}")
     if matches:
-        print(f"🎯 ¡Se encontraron {len(matches)} pares duplicados/contenidos!\n")
+        print(f"[RESULTADO] Se encontraron {len(matches)} pares duplicados/contenidos!\n")
         for i, m in enumerate(matches, 1):
             print(f"  [{i}] {m.summary()}\n")
     else:
-        print("✅ No se encontraron videos duplicados.")
+        print("[OK] No se encontraron videos duplicados.")
 
     print(f"{'='*60}")
-    print(f"⏱  Extracción: {t_extract:.1f}s | Comparación: {t_compare:.1f}s | Total: {t_total:.1f}s")
+    print(f"[TIEMPO] Extraccion: {t_extract:.1f}s | Comparacion: {t_compare:.1f}s | Total: {t_total:.1f}s")
 
-    # ── 6. Generar reporte HTML ──────────────────────────────────────────
+    # ── 6. Generar BD y thumbnails ───────────────────────────────────────
     if not args.no_report:
-        report_path = generate_html_report(
+        db_path = generate_report(
             matches=matches,
             all_fingerprints=fingerprints,
             output_dir=output_dir,
-            scan_time_seconds=t_total,
-            max_visual_matches=args.max_report,
         )
-        print(f"📄 Reporte generado: {report_path}")
+        if matches:
+            print("   Usa --viewer para abrir el visor grafico en cualquier momento.\n")
 
     print()
 
