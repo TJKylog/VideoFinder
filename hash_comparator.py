@@ -9,6 +9,7 @@ Optimizaciones:
   - Barra de progreso en la comparación.
 """
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from itertools import combinations
 from typing import List, Tuple
@@ -70,21 +71,41 @@ def _hamming_matrix(mat_a: np.ndarray, mat_b: np.ndarray) -> np.ndarray:
     return xor.sum(axis=2)  # (m, n)
 
 
+def _lis_length(seq: np.ndarray) -> int:
+    """
+    Longitud de la subsecuencia creciente más larga (LIS) en O(n log n).
+    Se usa para verificar que los frames coincidentes mantienen
+    un orden temporal coherente entre los dos videos.
+    """
+    if len(seq) == 0:
+        return 0
+    tails: list = []
+    for val in seq:
+        pos = bisect_left(tails, val)
+        if pos == len(tails):
+            tails.append(val)
+        else:
+            tails[pos] = val
+    return len(tails)
+
+
 def _greedy_match_fast(
     mat_a: np.ndarray,
     mat_b: np.ndarray,
     threshold: int,
-) -> Tuple[int, float]:
+) -> Tuple[int, float, np.ndarray]:
     """
     Para cada hash de A, encuentra el hash más cercano en B (vectorizado).
     Mucho más rápido que el loop puro de Python.
 
     Returns
     -------
-    (matches, avg_hamming)
+    (matches, avg_hamming, matched_b_indices)
+        matched_b_indices: índices en B de los frames de A que coincidieron,
+                           en el orden original de A.
     """
     if mat_a.shape[0] == 0 or mat_b.shape[0] == 0:
-        return 0, 999.0
+        return 0, 999.0, np.array([], dtype=np.intp)
 
     # Si la matriz sería muy grande (>50M), procesar en bloques
     max_elements = 50_000_000
@@ -94,19 +115,23 @@ def _greedy_match_fast(
         # Procesar A en bloques
         block_size = max(1, max_elements // len_b)
         min_dists = []
+        best_indices = []
         for start in range(0, len_a, block_size):
             end = min(start + block_size, len_a)
             dist_block = _hamming_matrix(mat_a[start:end], mat_b)
             min_dists.append(dist_block.min(axis=1))
+            best_indices.append(dist_block.argmin(axis=1))
         min_distances = np.concatenate(min_dists)
+        best_b_indices = np.concatenate(best_indices)
     else:
         dist_matrix = _hamming_matrix(mat_a, mat_b)
         min_distances = dist_matrix.min(axis=1)  # mejor match para cada hash de A
+        best_b_indices = dist_matrix.argmin(axis=1)
 
     mask = min_distances <= threshold
     matches = int(mask.sum())
     avg_hamming = float(min_distances[mask].mean()) if matches > 0 else 999.0
-    return matches, avg_hamming
+    return matches, avg_hamming, best_b_indices[mask]
 
 
 # ─── Modo GPU: Similitud Coseno ──────────────────────────────────────────────
@@ -124,16 +149,18 @@ def _greedy_match_cosine(
     mat_a: np.ndarray,
     mat_b: np.ndarray,
     threshold: float,
-) -> Tuple[int, float]:
+) -> Tuple[int, float, np.ndarray]:
     """
     Para cada embedding de A, encuentra el más similar en B por coseno.
 
     Returns
     -------
-    (matches, avg_similarity)  — avg_similarity está en 0..1
+    (matches, avg_similarity, matched_b_indices)
+        matched_b_indices: índices en B de los frames de A que coincidieron,
+                           en el orden original de A.
     """
     if mat_a.shape[0] == 0 or mat_b.shape[0] == 0:
-        return 0, 0.0
+        return 0, 0.0, np.array([], dtype=np.intp)
 
     max_elements = 50_000_000
     len_a, len_b = mat_a.shape[0], mat_b.shape[0]
@@ -141,19 +168,23 @@ def _greedy_match_cosine(
     if len_a * len_b > max_elements:
         block_size = max(1, max_elements // len_b)
         max_sims = []
+        best_indices = []
         for start in range(0, len_a, block_size):
             end = min(start + block_size, len_a)
             sim_block = _cosine_similarity_matrix(mat_a[start:end], mat_b)
             max_sims.append(sim_block.max(axis=1))
+            best_indices.append(sim_block.argmax(axis=1))
         max_similarities = np.concatenate(max_sims)
+        best_b_indices = np.concatenate(best_indices)
     else:
         sim_matrix = _cosine_similarity_matrix(mat_a, mat_b)
         max_similarities = sim_matrix.max(axis=1)  # mejor match por cada frame de A
+        best_b_indices = sim_matrix.argmax(axis=1)
 
     mask = max_similarities >= threshold
     matches = int(mask.sum())
     avg_sim = float(max_similarities[mask].mean()) if matches > 0 else 0.0
-    return matches, avg_sim
+    return matches, avg_sim, best_b_indices[mask]
 
 
 def _compare_with_matrices(
@@ -180,13 +211,21 @@ def _compare_with_matrices(
         )
 
     if config.USE_GPU:
-        matches, avg_sim = _greedy_match_cosine(
+        raw_matches, avg_sim, matched_b = _greedy_match_cosine(
             mat_a.astype(np.float32), mat_b.astype(np.float32),
             config.COSINE_THRESHOLD,
         )
         avg_metric = (1.0 - avg_sim) * 100 if avg_sim > 0 else 999.0
     else:
-        matches, avg_metric = _greedy_match_fast(mat_a, mat_b, config.HAMMING_THRESHOLD)
+        raw_matches, avg_metric, matched_b = _greedy_match_fast(
+            mat_a, mat_b, config.HAMMING_THRESHOLD,
+        )
+
+    # Verificación temporal: solo contar frames que mantienen
+    # una secuencia creciente coherente en B (LIS).
+    # Esto descarta coincidencias espurias entre videos no relacionados
+    # donde los frames coincidentes aparecen en orden aleatorio.
+    matches = _lis_length(matched_b) if len(matched_b) > 0 else 0
 
     return MatchResult(
         video_a=fp_a,

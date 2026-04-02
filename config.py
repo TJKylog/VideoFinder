@@ -7,6 +7,7 @@ Ajusta estos valores según tus necesidades.
 VIDEO_EXTENSIONS = {
     ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm",
     ".m4v", ".mpg", ".mpeg", ".3gp", ".ogv", ".ts", ".vob",
+    ".gif", ".rm",
 }
 
 # ─── Extracción de frames ───────────────────────────────────────────────────
