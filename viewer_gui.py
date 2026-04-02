@@ -8,6 +8,7 @@ Lanza un servidor HTTP local y abre el navegador automaticamente.
 import base64
 import json
 import os
+import shutil
 import socket
 import sys
 import webbrowser
@@ -121,7 +122,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
         try:
             p = Path(vid_path)
             if p.exists():
-                p.unlink()
+                trash_dir = p.parent / "_duplicados_papelera"
+                trash_dir.mkdir(exist_ok=True)
+                dest = trash_dir / p.name
+                # Evitar sobreescribir si ya existe un archivo con el mismo nombre
+                counter = 1
+                while dest.exists():
+                    dest = trash_dir / f"{p.stem}_{counter}{p.suffix}"
+                    counter += 1
+                shutil.move(str(p), str(dest))
             db_manager.mark_deleted(self.db_path, vid_id)
             self._json({"ok": True})
         except OSError as e:
